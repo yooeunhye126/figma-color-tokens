@@ -1,0 +1,23 @@
+{
+  "name": "figma-color-tokens",
+  "version": "1.0.0",
+  "description": "선택한 Color Style을 읽어 tokens.json으로 내보내는 Figma 플러그인",
+  "license": "MIT",
+  "scripts": {
+    "build:code": "vite build --config vite.config.code.ts",
+    "build:ui": "vite build --config vite.config.ui.ts",
+    "build": "npm run build:code && npm run build:ui",
+    "watch:code": "vite build --watch --config vite.config.code.ts",
+    "watch:ui": "vite build --watch --config vite.config.ui.ts",
+    "dev": "concurrently -k \"npm:watch:code\" \"npm:watch:ui\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.0",
+    "@types/node": "^22.20.0",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vite-plugin-singlefile": "^2.0.0"
+  }
+}
