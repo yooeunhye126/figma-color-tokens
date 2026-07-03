@@ -20,10 +20,7 @@ function rgbToHex(r: number, g: number, b: number, a: number): string {
   return a < 1 ? `${hex}${channelToHex(a)}` : hex;
 }
 
-/**
- * 문서의 Color Style(로컬 Paint Style) 중
- * SOLID 채색을 가진 것만 읽어 ColorToken 배열로 변환한다.
- */
+/** 문서의 Color Style(로컬 Paint Style, SOLID)을 ColorToken으로 변환 */
 async function readColorStyles(): Promise<ColorToken[]> {
   const styles = await figma.getLocalPaintStylesAsync();
   const tokens: ColorToken[] = [];
@@ -43,6 +40,80 @@ async function readColorStyles(): Promise<ColorToken[]> {
   }
 
   return tokens;
+}
+
+/**
+ * 변수 값(RGBA 또는 다른 변수를 가리키는 별칭)을 최종 RGBA 색상으로 해석.
+ * 별칭이면 참조 대상을 따라가며(순환 방지 depth 제한) 실제 색을 찾는다.
+ */
+async function resolveColorValue(
+  value: VariableValue,
+  depth = 0,
+): Promise<RGBA | null> {
+  if (depth > 10 || value == null) return null;
+
+  // 다른 변수를 가리키는 별칭
+  if (typeof value === "object" && "type" in value && value.type === "VARIABLE_ALIAS") {
+    const ref = await figma.variables.getVariableByIdAsync(value.id);
+    if (!ref) return null;
+    const firstModeId = Object.keys(ref.valuesByMode)[0];
+    if (!firstModeId) return null;
+    return resolveColorValue(ref.valuesByMode[firstModeId], depth + 1);
+  }
+
+  // RGB / RGBA 색상 값
+  if (typeof value === "object" && "r" in value) {
+    return { r: value.r, g: value.g, b: value.b, a: "a" in value ? value.a : 1 };
+  }
+
+  return null;
+}
+
+/**
+ * 문서의 Color Variable(로컬 색상 변수)을 ColorToken으로 변환.
+ * 컬렉션에 모드가 2개 이상이면(라이트/다크 등) 경로 끝에 모드 이름을 붙인다.
+ */
+async function readColorVariables(): Promise<ColorToken[]> {
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
+  const collectionById = new Map(collections.map((c) => [c.id, c]));
+  const modeNameById = new Map<string, string>();
+  for (const collection of collections) {
+    for (const mode of collection.modes) modeNameById.set(mode.modeId, mode.name);
+  }
+
+  const variables = await figma.variables.getLocalVariablesAsync("COLOR");
+  const tokens: ColorToken[] = [];
+
+  for (const variable of variables) {
+    const collection = collectionById.get(variable.variableCollectionId);
+    const isMultiMode = (collection?.modes.length ?? 1) > 1;
+
+    for (const modeId of Object.keys(variable.valuesByMode)) {
+      const rgba = await resolveColorValue(variable.valuesByMode[modeId]);
+      if (!rgba) continue;
+
+      const name = isMultiMode
+        ? `${variable.name}/${modeNameById.get(modeId) ?? modeId}`
+        : variable.name;
+
+      tokens.push({
+        name,
+        hex: rgbToHex(rgba.r, rgba.g, rgba.b, rgba.a).toUpperCase(),
+        rgba,
+      });
+    }
+  }
+
+  return tokens;
+}
+
+/** Color Style + Color Variable을 모두 읽어 합친다. */
+async function readColorTokens(): Promise<ColorToken[]> {
+  const [styles, variables] = await Promise.all([
+    readColorStyles(),
+    readColorVariables(),
+  ]);
+  return [...styles, ...variables];
 }
 
 /**
@@ -83,13 +154,13 @@ function postToUi(message: PluginToUiMessage): void {
 figma.ui.onmessage = async (message: UiToPluginMessage) => {
   if (message.type === "generate-tokens") {
     try {
-      const tokens = await readColorStyles();
+      const tokens = await readColorTokens();
 
       if (tokens.length === 0) {
         postToUi({
           type: "error",
           message:
-            "읽을 수 있는 Color Style이 없습니다. 문서에 Solid 색상 스타일을 추가해 주세요.",
+            "읽을 수 있는 Color Style / Color Variable이 없습니다. 색상이 이 파일에 로컬로 있는지 확인하세요. (팀 라이브러리의 스타일·변수는 읽을 수 없습니다)",
         });
         return;
       }
