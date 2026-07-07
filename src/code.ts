@@ -1,12 +1,18 @@
 /// <reference types="@figma/plugin-typings" />
 import type {
-  ColorToken,
+  DesignToken,
   PluginToUiMessage,
+  TokenEntry,
   UiToPluginMessage,
 } from "./types";
 
 // UI 창 표시 (dist/ui.html이 __html__로 주입됨)
 figma.showUI(__html__, { width: 360, height: 480 });
+
+/** 소수점 긴 값 정리 (최대 3자리) */
+function round(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
 
 /** 0~1 채널 값을 2자리 HEX로 변환 */
 function channelToHex(channel: number): string {
@@ -17,13 +23,17 @@ function channelToHex(channel: number): string {
 /** RGB(A) -> #RRGGBB 또는 #RRGGBBAA */
 function rgbToHex(r: number, g: number, b: number, a: number): string {
   const hex = `#${channelToHex(r)}${channelToHex(g)}${channelToHex(b)}`;
-  return a < 1 ? `${hex}${channelToHex(a)}` : hex;
+  return (a < 1 ? `${hex}${channelToHex(a)}` : hex).toUpperCase();
 }
 
-/** 문서의 Color Style(로컬 Paint Style, SOLID)을 ColorToken으로 변환 */
-async function readColorStyles(): Promise<ColorToken[]> {
+// ────────────────────────────────────────────────────────────
+// Color Style
+// ────────────────────────────────────────────────────────────
+
+/** 문서의 Color Style(로컬 Paint Style, SOLID)을 TokenEntry로 변환 */
+async function readColorStyles(): Promise<TokenEntry[]> {
   const styles = await figma.getLocalPaintStylesAsync();
-  const tokens: ColorToken[] = [];
+  const entries: TokenEntry[] = [];
 
   for (const style of styles) {
     const paint = style.paints[0];
@@ -32,15 +42,18 @@ async function readColorStyles(): Promise<ColorToken[]> {
     const { r, g, b } = paint.color;
     const a = paint.opacity ?? 1;
 
-    tokens.push({
+    entries.push({
       name: style.name,
-      hex: rgbToHex(r, g, b, a).toUpperCase(),
-      rgba: { r, g, b, a },
+      token: { $type: "color", $value: rgbToHex(r, g, b, a) },
     });
   }
 
-  return tokens;
+  return entries;
 }
+
+// ────────────────────────────────────────────────────────────
+// Color Variable
+// ────────────────────────────────────────────────────────────
 
 /**
  * 변수 값(RGBA 또는 다른 변수를 가리키는 별칭)을 최종 RGBA 색상으로 해석.
@@ -70,10 +83,10 @@ async function resolveColorValue(
 }
 
 /**
- * 문서의 Color Variable(로컬 색상 변수)을 ColorToken으로 변환.
+ * 문서의 Color Variable(로컬 색상 변수)을 TokenEntry로 변환.
  * 컬렉션에 모드가 2개 이상이면(라이트/다크 등) 경로 끝에 모드 이름을 붙인다.
  */
-async function readColorVariables(): Promise<ColorToken[]> {
+async function readColorVariables(): Promise<TokenEntry[]> {
   const collections = await figma.variables.getLocalVariableCollectionsAsync();
   const collectionById = new Map(collections.map((c) => [c.id, c]));
   const modeNameById = new Map<string, string>();
@@ -82,7 +95,7 @@ async function readColorVariables(): Promise<ColorToken[]> {
   }
 
   const variables = await figma.variables.getLocalVariablesAsync("COLOR");
-  const tokens: ColorToken[] = [];
+  const entries: TokenEntry[] = [];
 
   for (const variable of variables) {
     const collection = collectionById.get(variable.variableCollectionId);
@@ -96,43 +109,115 @@ async function readColorVariables(): Promise<ColorToken[]> {
         ? `${variable.name}/${modeNameById.get(modeId) ?? modeId}`
         : variable.name;
 
-      tokens.push({
+      entries.push({
         name,
-        hex: rgbToHex(rgba.r, rgba.g, rgba.b, rgba.a).toUpperCase(),
-        rgba,
+        token: { $type: "color", $value: rgbToHex(rgba.r, rgba.g, rgba.b, rgba.a) },
       });
     }
   }
 
-  return tokens;
+  return entries;
 }
 
-/** Color Style + Color Variable을 모두 읽어 합친다. */
-async function readColorTokens(): Promise<ColorToken[]> {
-  const [styles, variables] = await Promise.all([
-    readColorStyles(),
-    readColorVariables(),
-  ]);
-  return [...styles, ...variables];
+// ────────────────────────────────────────────────────────────
+// Text Style (Typography)
+// ────────────────────────────────────────────────────────────
+
+/** 폰트 스타일 이름("Bold", "Semi Bold" 등)을 숫자 weight로 매핑 (best-effort) */
+const FONT_WEIGHT_MAP: Record<string, number> = {
+  thin: 100,
+  hairline: 100,
+  extralight: 200,
+  ultralight: 200,
+  light: 300,
+  book: 350,
+  regular: 400,
+  normal: 400,
+  medium: 500,
+  semibold: 600,
+  demibold: 600,
+  bold: 700,
+  extrabold: 800,
+  ultrabold: 800,
+  black: 900,
+  heavy: 900,
+};
+
+function resolveFontWeight(fontStyle: string): number {
+  const normalized = fontStyle
+    .toLowerCase()
+    .replace(/italic|oblique/g, "")
+    .replace(/[^a-z]/g, "");
+  return FONT_WEIGHT_MAP[normalized] ?? 400;
+}
+
+/** lineHeight를 문자열/숫자로 표현 (AUTO / px / %) */
+function formatLineHeight(lineHeight: LineHeight): string {
+  if (lineHeight.unit === "AUTO") return "AUTO";
+  if (lineHeight.unit === "PERCENT") return `${round(lineHeight.value)}%`;
+  return `${round(lineHeight.value)}px`;
+}
+
+/** letterSpacing을 문자열로 표현 (px / %) */
+function formatLetterSpacing(letterSpacing: LetterSpacing): string {
+  if (letterSpacing.unit === "PERCENT") return `${round(letterSpacing.value)}%`;
+  return `${round(letterSpacing.value)}px`;
 }
 
 /**
- * ColorToken 배열을 "/" 구분 기준으로 중첩된
+ * 문서의 Text Style(로컬 텍스트 스타일)을 typography 합성 토큰으로 변환.
+ * DTCG typography 형식: fontFamily / fontWeight / fontSize / lineHeight / letterSpacing
+ */
+async function readTextStyles(): Promise<TokenEntry[]> {
+  const styles = await figma.getLocalTextStylesAsync();
+
+  return styles.map((style) => {
+    const token: DesignToken = {
+      $type: "typography",
+      $value: {
+        fontFamily: style.fontName.family,
+        fontStyle: style.fontName.style,
+        fontWeight: resolveFontWeight(style.fontName.style),
+        fontSize: `${round(style.fontSize)}px`,
+        lineHeight: formatLineHeight(style.lineHeight),
+        letterSpacing: formatLetterSpacing(style.letterSpacing),
+      },
+    };
+    return { name: style.name, token };
+  });
+}
+
+// ────────────────────────────────────────────────────────────
+// 집계 & 직렬화
+// ────────────────────────────────────────────────────────────
+
+/** Color Style + Color Variable + Text Style을 모두 읽어 합친다. */
+async function readAllTokens(): Promise<TokenEntry[]> {
+  const [colorStyles, colorVariables, textStyles] = await Promise.all([
+    readColorStyles(),
+    readColorVariables(),
+    readTextStyles(),
+  ]);
+  return [...colorStyles, ...colorVariables, ...textStyles];
+}
+
+/**
+ * TokenEntry 배열을 "/" 구분 기준으로 중첩된
  * 디자인 토큰(W3C 형식: $type / $value) 객체로 변환한다.
  *
  * 예) "Brand/Primary" ->
  *   { "Brand": { "Primary": { "$type": "color", "$value": "#..." } } }
  */
-function buildTokensJson(tokens: ColorToken[]): string {
+function buildTokensJson(entries: TokenEntry[]): string {
   const root: Record<string, unknown> = {};
 
-  for (const token of tokens) {
-    const path = token.name.split("/").map((segment) => segment.trim());
+  for (const entry of entries) {
+    const path = entry.name.split("/").map((segment) => segment.trim());
     let cursor = root;
 
     path.forEach((segment, index) => {
       if (index === path.length - 1) {
-        cursor[segment] = { $type: "color", $value: token.hex };
+        cursor[segment] = entry.token;
       } else {
         if (typeof cursor[segment] !== "object" || cursor[segment] === null) {
           cursor[segment] = {};
@@ -154,19 +239,19 @@ function postToUi(message: PluginToUiMessage): void {
 figma.ui.onmessage = async (message: UiToPluginMessage) => {
   if (message.type === "generate-tokens") {
     try {
-      const tokens = await readColorTokens();
+      const entries = await readAllTokens();
 
-      if (tokens.length === 0) {
+      if (entries.length === 0) {
         postToUi({
           type: "error",
           message:
-            "읽을 수 있는 Color Style / Color Variable이 없습니다. 색상이 이 파일에 로컬로 있는지 확인하세요. (팀 라이브러리의 스타일·변수는 읽을 수 없습니다)",
+            "읽을 수 있는 Color / Text Style·Variable이 없습니다. 색상·텍스트가 이 파일에 로컬로 있는지 확인하세요. (팀 라이브러리의 스타일·변수는 읽을 수 없습니다)",
         });
         return;
       }
 
-      const json = buildTokensJson(tokens);
-      postToUi({ type: "tokens-generated", count: tokens.length, json });
+      const json = buildTokensJson(entries);
+      postToUi({ type: "tokens-generated", count: entries.length, json });
     } catch (error) {
       postToUi({
         type: "error",
